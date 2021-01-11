@@ -17,6 +17,7 @@ from enum import Enum
 
 import regex as re
 from tools.text_denormalization.verbalizer import (
+    _ordinals_dict,
     _numbers_dict,
     _currency_dict,
     _inflect,
@@ -114,8 +115,12 @@ _re_left_boundary = r'(^|[\s\(\[\{\<\'\"\`])'
 _re_right_boundary = r'($|(\s|\)|\]|\}|\>|(\'|\"|\`|\.|\,|\;|\:|\?|\!)([^\w]|$)))'
 
 _numbers_keys = map(re.escape, _numbers_dict.keys())
-_re_numbers = f"({'|'.join(_numbers_keys)}|and|point|\s)"
+_re_cardinal = f"({'|'.join(_numbers_keys)}|and|\s)"
+_re_decimal = f"({_re_cardinal}|point)"
 
+
+_ordinal_keys = map(re.escape, _ordinals_dict.keys())
+_re_ordinal = f"({'|'.join(_ordinal_keys)})"
 
 _re_time_hour = r'[0-1]?[0-9]|2[0-3]'
 _re_date_month = r'0?[1-9]|1[012]'
@@ -135,12 +140,11 @@ _whitelist_keys = map(re.escape, _whitelist_dict.keys())
 _re_whitelist = f"({'|'.join(_whitelist_keys)})"
 
 re_whitelist = make_re(rf'{_re_whitelist}')
-re_cardinal = make_re(rf'(minus)?({_re_numbers})+')
-re_ordinal = make_re(rf'(?P<number>[0-9]+)(st|nd|rd|th)')
+re_cardinal = make_re(rf'(?P<minus>minus )?(?P<number>({_re_cardinal})+)')
+re_decimal = make_re(rf'(?P<minus>minus )?(?P<number>({_re_decimal})+)')
+re_ordinal = make_re(rf'((?P<number>({_re_cardinal})*)(th|\s(?P<suffix>{_re_ordinal})))')  ## wrong
 # re_ordinal_roman = make_re(rf'(?P<number>[0-9]+)(st|nd|rd|th)')
 re_roman = make_re(rf'{_re_roman}')
-re_decimal = make_re(rf'-?(\d+(\,\d+)*)\.(\d+)')
-re_decimal2 = make_re(rf'-?\.\d+')
 
 re_verbatim_and = make_re(rf'&')
 # re_verbatim_silence = make_re(rf'[-]')
@@ -302,13 +306,8 @@ def tag_decimal(text: str):
         text: input string
     Returns: Generates all decimal tags from text
     """
-    normalize = (
-        lambda data: _inflect.number_to_words(data["value"]).replace("-", " ").replace(" and ", " ").replace(",", "")
-    )
-    yield from re_tag(text, TagType.DECIMAL, normalize, re_decimal)
 
-    normalize = lambda data: _inflect.number_to_words(data["value"])
-    yield from re_tag(text, TagType.DECIMAL, normalize, re_decimal2)
+    yield from re_tag(text, TagType.DECIMAL, expand_cardinal, re_decimal)
 
 
 def tag_date(text: str):

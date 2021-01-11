@@ -25,6 +25,10 @@ numbers_tsv = open(os.path.dirname(os.path.abspath(__file__)) + "/data/numbers.t
 read_tsv = csv.reader(numbers_tsv, delimiter="\t")
 _numbers_dict = dict(read_tsv)
 
+ordinals_tsv = open(os.path.dirname(os.path.abspath(__file__)) + "/data/ordinals.tsv")
+read_tsv = csv.reader(ordinals_tsv, delimiter="\t")
+_ordinals_dict = dict(read_tsv)
+
 month_tsv = open(os.path.dirname(os.path.abspath(__file__)) + "/data/months.tsv")
 read_tsv = csv.reader(month_tsv, delimiter="\t")
 _month_dict = dict(read_tsv)
@@ -84,8 +88,14 @@ def expand_cardinal(data: dict) -> str:
         data: detected data
     Returns string
     """
-    result = w2n(data["value"])
-    return str(result)
+    result = ""
+    if data.get("minus"):
+        result += '-'
+    try:
+        result += str(w2n(data["number"]))
+    except Exception:
+        result = data["value"] # pass through input unchanged since invalid number format
+    return result
 
 
 def expand_ordinal(data: dict) -> str:
