@@ -14,6 +14,9 @@
 import io
 import os
 from typing import Callable, Dict, List, Optional, Union
+import socket
+import struct
+import json
 
 import braceexpand
 import torch
@@ -196,6 +199,142 @@ class _AudioTextDataset(Dataset):
     def _collate_fn(self, batch):
         return _speech_collate_fn(batch, pad_id=self.pad_id)
 
+class _AudioTextRollingBufferDataset(Dataset):
+    """
+    Dataset that loads tensors via a json file containing paths to audio files, transcripts, and durations (in seconds).
+    Each new line is a different sample. Example below:
+    {"audio_filepath": "/path/to/audio.wav", "text_filepath": "/path/to/audio.txt", "duration": 23.147}
+    ...
+    {"audio_filepath": "/path/to/audio.wav", "text": "the transcription", "offset": 301.75, "duration": 0.82, "utt":
+    "utterance_id", "ctm_utt": "en_4156", "side": "A"}
+    Args:
+        manifest_filepath: Path to manifest json as described above. Can be comma-separated paths.
+        labels: String containing all the possible characters to map to
+        sample_rate (int): Sample rate to resample loaded audio to
+        int_values (bool): If true, load samples as 32-bit integers. Defauts to False.
+        augmentor (nemo.collections.asr.parts.perturb.AudioAugmentor): An AudioAugmentor object used to augment loaded
+            audio
+        max_duration: If audio exceeds this length, do not include in dataset
+        min_duration: If audio is less than this length, do not include in dataset
+        max_utts: Limit number of utterances
+        blank_index: blank character index, default = -1
+        unk_index: unk_character index, default = -1
+        normalize: whether to normalize transcript text (default): True
+        bos_id: Id of beginning of sequence symbol to append if not None
+        eos_id: Id of end of sequence symbol to append if not None
+        load_audio: Boolean flag indicate whether do or not load audio
+        add_misc: True if add additional info dict.
+    """
+
+    @property
+    def output_types(self) -> Optional[Dict[str, NeuralType]]:
+        """Returns definitions of module output ports.
+               """
+        return {
+            'audio_signal': NeuralType(
+                ('B', 'T'),
+                AudioSignal(freq=self._sample_rate)  # TODO: self._sample_rate is not defined anywhere
+                if self is not None and hasattr(self, '_sample_rate')
+                else AudioSignal(),
+            ),
+            'a_sig_length': NeuralType(tuple('B'), LengthsType()),
+            'transcripts': NeuralType(('B', 'T'), LabelsType()),
+            'transcript_length': NeuralType(tuple('B'), LengthsType()),
+        }
+
+    def __init__(
+        self,
+        manifest_filepath: str,
+        parser: Union[str, Callable],
+        sample_rate: int,
+        int_values: bool = False,
+        augmentor: 'nemo.collections.asr.parts.perturb.AudioAugmentor' = None,
+        max_duration: Optional[int] = None,
+        min_duration: Optional[int] = None,
+        max_utts: int = 0,
+        trim: bool = False,
+        bos_id: Optional[int] = None,
+        eos_id: Optional[int] = None,
+        pad_id: int = 0,
+        load_audio: bool = True,
+        add_misc: bool = False,
+        buffer_size: int = None,
+    ):
+        if parser == 'en':
+            parser = parsers.CharParser()
+        self.parser = parser
+
+        '''self.collection = collections.ASRAudioText(
+            manifests_files=manifest_filepath.split(','),
+            parser=parser,
+            min_duration=min_duration,
+            max_duration=max_duration,
+            max_number=max_utts,
+        )'''
+
+        self.buffer_size = buffer_size
+
+        assert 'BUFFER_IP' in os.environ.keys()
+        assert 'BUFFER_PORT' in os.environ.keys()
+        server_ip = os.environ['BUFFER_IP']
+        server_port = int(os.environ['BUFFER_PORT'])
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.connect((server_ip, server_port))
+
+        self.featurizer = WaveformFeaturizer(sample_rate=sample_rate, int_values=int_values, augmentor=augmentor)
+        self.trim = trim
+        self.eos_id = eos_id
+        self.bos_id = bos_id
+        self.pad_id = pad_id
+        self.load_audio = load_audio
+        self._add_misc = add_misc
+
+    def __getitem__(self, index):
+        self.socket.sendall(struct.pack('q', index))
+        data = self.socket.recv(2048)
+        data = data.decode('utf-8')
+        data = json.loads(data)
+        text = data['text']
+        audio_file = data['audio_filepath']
+        buffer_file_id = data['id']
+        text_tokens = self.parser(text)
+
+        if self.load_audio:
+            
+            offset = 0
+
+            features = self.featurizer.process(
+                audio_file, offset=offset, duration=0, trim=self.trim,
+            )
+            self.socket.sendall(struct.pack('q', buffer_file_id))
+            f, fl = features, torch.tensor(features.shape[0]).long()
+        else:
+            f, fl = None, None
+
+        t, tl = text_tokens, len(text_tokens)
+        if self.bos_id is not None:
+            t = [self.bos_id] + t
+            tl += 1
+        if self.eos_id is not None:
+            t = t + [self.eos_id]
+            tl += 1
+
+        output = f, fl, torch.tensor(t).long(), torch.tensor(tl).long()
+
+        if self._add_misc:
+            misc = dict()
+            misc['id'] = None
+            misc['text_raw'] = text
+            misc['speaker'] = None
+            output = (output, misc)
+
+        return output
+
+    def __len__(self):
+        return self.buffer_size
+
+    def _collate_fn(self, batch):
+        return _speech_collate_fn(batch, pad_id=self.pad_id)
 
 @experimental
 class AudioToCharDataset(_AudioTextDataset):
@@ -290,6 +429,98 @@ class AudioToCharDataset(_AudioTextDataset):
             add_misc=add_misc,
         )
 
+@experimental
+class AudioToCharRollingBufferDataset(_AudioTextRollingBufferDataset):
+    """
+    Dataset that loads tensors via a json file containing paths to audio
+    files, transcripts, and durations (in seconds). Each new line is a
+    different sample. Example below:
+    {"audio_filepath": "/path/to/audio.wav", "text_filepath":
+    "/path/to/audio.txt", "duration": 23.147}
+    ...
+    {"audio_filepath": "/path/to/audio.wav", "text": "the
+    transcription", "offset": 301.75, "duration": 0.82, "utt":
+    "utterance_id", "ctm_utt": "en_4156", "side": "A"}
+    Args:
+        manifest_filepath: Path to manifest json as described above. Can
+            be comma-separated paths.
+        labels: String containing all the possible characters to map to
+        sample_rate (int): Sample rate to resample loaded audio to
+        int_values (bool): If true, load samples as 32-bit integers. Defauts to False.
+        augmentor (nemo.collections.asr.parts.perturb.AudioAugmentor): An AudioAugmentor
+            object used to augment loaded audio
+        max_duration: If audio exceeds this length, do not include in dataset
+        min_duration: If audio is less than this length, do not include
+            in dataset
+        max_utts: Limit number of utterances
+        blank_index: blank character index, default = -1
+        unk_index: unk_character index, default = -1
+        normalize: whether to normalize transcript text (default): True
+        bos_id: Id of beginning of sequence symbol to append if not None
+        eos_id: Id of end of sequence symbol to append if not None
+        load_audio: Boolean flag indicate whether do or not load audio
+        add_misc: True if add additional info dict.
+    """
+
+    @property
+    def output_types(self) -> Optional[Dict[str, NeuralType]]:
+        """Returns definitions of module output ports.
+               """
+        return {
+            'audio_signal': NeuralType(
+                ('B', 'T'),
+                AudioSignal(freq=self._sample_rate)
+                if self is not None and hasattr(self, '_sample_rate')
+                else AudioSignal(),
+            ),
+            'a_sig_length': NeuralType(tuple('B'), LengthsType()),
+            'transcripts': NeuralType(('B', 'T'), LabelsType()),
+            'transcript_length': NeuralType(tuple('B'), LengthsType()),
+        }
+
+    def __init__(
+        self,
+        manifest_filepath: str,
+        labels: Union[str, List[str]],
+        sample_rate: int,
+        int_values: bool = False,
+        augmentor: 'nemo.collections.asr.parts.perturb.AudioAugmentor' = None,
+        max_duration: Optional[float] = None,
+        min_duration: Optional[float] = None,
+        max_utts: int = 0,
+        blank_index: int = -1,
+        unk_index: int = -1,
+        normalize: bool = True,
+        trim: bool = False,
+        bos_id: Optional[int] = None,
+        eos_id: Optional[int] = None,
+        pad_id: int = 0,
+        load_audio: bool = True,
+        parser: Union[str, Callable] = 'en',
+        add_misc: bool = False,
+    ):
+        self.labels = labels
+
+        parser = parsers.make_parser(
+            labels=labels, name=parser, unk_id=unk_index, blank_id=blank_index, do_normalize=normalize
+        )
+
+        super().__init__(
+            manifest_filepath=manifest_filepath,
+            parser=parser,
+            sample_rate=sample_rate,
+            int_values=int_values,
+            augmentor=augmentor,
+            max_duration=max_duration,
+            min_duration=min_duration,
+            max_utts=max_utts,
+            trim=trim,
+            bos_id=bos_id,
+            eos_id=eos_id,
+            pad_id=pad_id,
+            load_audio=load_audio,
+            add_misc=add_misc,
+        )
 
 class AudioToCharWithDursDataset(AudioToCharDataset):
     """

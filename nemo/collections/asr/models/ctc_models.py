@@ -286,6 +286,9 @@ class EncDecCTCModel(ASRModel, Exportable):
                 augmentor=augmentor,
             )
             shuffle = False
+        if config.get('is_rolling_buffer', False):
+            dataset = audio_to_text_dataset.get_rolling_buffer_dataset(config=config, augmentor=augmentor)
+            shuffle = False
         else:
             if 'manifest_filepath' in config and config['manifest_filepath'] is None:
                 logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")

@@ -50,6 +50,37 @@ def get_char_dataset(config: dict, augmentor: Optional['AudioAugmentor'] = None)
     )
     return dataset
 
+def get_rolling_buffer_dataset(config: dict, augmentor: Optional['AudioAugmentor'] = None) -> audio_to_text.AudioToCharRollingBufferDataset:
+    """
+    Instantiates a Character Encoding based AudioToCharDataset.
+
+    Args:
+        config: Config of the AudioToCharDataset.
+        augmentor: Optional AudioAugmentor object for augmentations on audio data.
+
+    Returns:
+        An instance of AudioToCharDataset.
+    """
+    dataset = audio_to_text.AudioToCharRollingBufferDataset(
+        manifest_filepath=config['manifest_filepath'],
+        labels=config['labels'],
+        sample_rate=config['sample_rate'],
+        int_values=config.get('int_values', False),
+        augmentor=augmentor,
+        max_duration=config.get('max_duration', None),
+        min_duration=config.get('min_duration', None),
+        max_utts=config.get('max_utts', 0),
+        blank_index=config.get('blank_index', -1),
+        unk_index=config.get('unk_index', -1),
+        normalize=config.get('normalize_transcripts', False),
+        trim=config.get('trim_silence', False),
+        load_audio=config.get('load_audio', True),
+        parser=config.get('parser', 'en'),
+        add_misc=config.get('add_misc', False),
+        buffer_size=config.get('buffer_size', None),
+    )
+    return dataset
+
 
 def get_bpe_dataset(
     config: dict, tokenizer: 'TokenizerSpec', augmentor: Optional['AudioAugmentor'] = None
