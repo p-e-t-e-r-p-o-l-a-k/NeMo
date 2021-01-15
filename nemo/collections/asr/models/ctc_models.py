@@ -17,6 +17,7 @@ import os
 import tempfile
 from math import ceil
 from typing import Dict, List, Optional, Union
+from nemo.collections.asr import data
 
 import onnx
 import torch
@@ -254,6 +255,7 @@ class EncDecCTCModel(ASRModel, Exportable):
 
         shuffle = config['shuffle']
         device = 'gpu' if torch.cuda.is_available() else 'cpu'
+        worker_init_fn = None
         if config.get('use_dali', False):
             device_id = self.local_rank if device == 'gpu' else None
             dataset = audio_to_text_dataset.get_dali_char_dataset(
@@ -288,6 +290,7 @@ class EncDecCTCModel(ASRModel, Exportable):
             shuffle = False
         if config.get('is_rolling_buffer', False):
             dataset = audio_to_text_dataset.get_rolling_buffer_dataset(config=config, augmentor=augmentor)
+            worker_init_fn = dataset.worker_init_fn
             shuffle = False
         else:
             if 'manifest_filepath' in config and config['manifest_filepath'] is None:
@@ -304,6 +307,7 @@ class EncDecCTCModel(ASRModel, Exportable):
             shuffle=shuffle,
             num_workers=config.get('num_workers', 0),
             pin_memory=config.get('pin_memory', False),
+            worker_init_fn=worker_init_fn,
         )
 
     def setup_training_data(self, train_data_config: Optional[Union[DictConfig, Dict]]):

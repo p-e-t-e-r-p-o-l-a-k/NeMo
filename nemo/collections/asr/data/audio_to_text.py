@@ -13,10 +13,13 @@
 # limitations under the License.
 import io
 import os
+import time
 from typing import Callable, Dict, List, Optional, Union
 import socket
 import struct
 import json
+import threading
+import queue
 
 import braceexpand
 import torch
@@ -199,6 +202,8 @@ class _AudioTextDataset(Dataset):
     def _collate_fn(self, batch):
         return _speech_collate_fn(batch, pad_id=self.pad_id)
 
+s = None
+
 class _AudioTextRollingBufferDataset(Dataset):
     """
     Dataset that loads tensors via a json file containing paths to audio files, transcripts, and durations (in seconds).
@@ -242,6 +247,14 @@ class _AudioTextRollingBufferDataset(Dataset):
             'transcript_length': NeuralType(tuple('B'), LengthsType()),
         }
 
+    queue = queue.Queue(maxsize=256)
+
+    def worker_init_fn(self, worker_id):
+        worker_info = torch.utils.data.get_worker_info()
+        dataset = worker_info.dataset
+        dataset.start_client()
+        print(f'Client started in {worker_id}')
+
     def __init__(
         self,
         manifest_filepath: str,
@@ -276,10 +289,8 @@ class _AudioTextRollingBufferDataset(Dataset):
 
         assert 'BUFFER_IP' in os.environ.keys()
         assert 'BUFFER_PORT' in os.environ.keys()
-        server_ip = os.environ['BUFFER_IP']
-        server_port = int(os.environ['BUFFER_PORT'])
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.connect((server_ip, server_port))
+        self.server_ip = os.environ['BUFFER_IP']
+        self.server_port = int(os.environ['BUFFER_PORT'])
 
         self.featurizer = WaveformFeaturizer(sample_rate=sample_rate, int_values=int_values, augmentor=augmentor)
         self.trim = trim
@@ -289,14 +300,36 @@ class _AudioTextRollingBufferDataset(Dataset):
         self.load_audio = load_audio
         self._add_misc = add_misc
 
+    def start_client(self):
+        self.t = threading.Thread(target=self.client)
+        self.t.setDaemon(True)
+        self.t.start()
+
+    def client(self):
+        while True:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.connect((self.server_ip, self.server_port))
+                sock.sendall(struct.pack('q', 0x22))
+                print('connected')
+            except:
+                continue
+            while True:
+                try:
+                    sock.sendall(struct.pack('q', 1))
+                    datalen = sock.recv(8)
+                    datalen = struct.unpack('q', datalen)[0]
+                    data = sock.recv(datalen)
+                    data = data.decode('utf-8')
+                    data = json.loads(data)
+                    _AudioTextRollingBufferDataset.queue.put(data)
+                except:
+                    break
+
     def __getitem__(self, index):
-        self.socket.sendall(struct.pack('q', index))
-        data = self.socket.recv(2048)
-        data = data.decode('utf-8')
-        data = json.loads(data)
-        text = data['text']
+        data = _AudioTextRollingBufferDataset.queue.get()
+        text = data['text'].lower()
         audio_file = data['audio_filepath']
-        buffer_file_id = data['id']
         text_tokens = self.parser(text)
 
         if self.load_audio:
@@ -306,7 +339,10 @@ class _AudioTextRollingBufferDataset(Dataset):
             features = self.featurizer.process(
                 audio_file, offset=offset, duration=0, trim=self.trim,
             )
-            self.socket.sendall(struct.pack('q', buffer_file_id))
+            try:
+                os.remove(audio_file)
+            except:
+                print(audio_file)
             f, fl = features, torch.tensor(features.shape[0]).long()
         else:
             f, fl = None, None
@@ -498,6 +534,7 @@ class AudioToCharRollingBufferDataset(_AudioTextRollingBufferDataset):
         load_audio: bool = True,
         parser: Union[str, Callable] = 'en',
         add_misc: bool = False,
+        buffer_size: int = None,
     ):
         self.labels = labels
 
@@ -520,6 +557,7 @@ class AudioToCharRollingBufferDataset(_AudioTextRollingBufferDataset):
             pad_id=pad_id,
             load_audio=load_audio,
             add_misc=add_misc,
+            buffer_size=buffer_size,
         )
 
 class AudioToCharWithDursDataset(AudioToCharDataset):
