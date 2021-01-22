@@ -306,6 +306,11 @@ class _AudioTextRollingBufferDataset(Dataset):
         self.t.start()
 
     def client(self):
+        def recv(sock, l):
+            data = b''
+            while len(data) < l:
+                data += sock.recv(l - len(data))
+            return data
         while True:
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -317,9 +322,9 @@ class _AudioTextRollingBufferDataset(Dataset):
             while True:
                 try:
                     sock.sendall(struct.pack('q', 1))
-                    datalen = sock.recv(8)
+                    datalen = recv(sock, 8)
                     datalen = struct.unpack('q', datalen)[0]
-                    data = sock.recv(datalen)
+                    data = recv(sock, datalen)
                     data = data.decode('utf-8')
                     data = json.loads(data)
                     _AudioTextRollingBufferDataset.queue.put(data)
