@@ -292,6 +292,18 @@ class EncDecCTCModel(ASRModel, Exportable):
             dataset = audio_to_text_dataset.get_rolling_buffer_dataset(config=config, augmentor=augmentor)
             worker_init_fn = dataset.worker_init_fn
             shuffle = False
+        elif config.get('is_effective', False):
+            dataset = audio_to_text_dataset.get_effective_dataset(config=config, augmentor=augmentor)
+            worker_init_fn = dataset.worker_init_fn
+            shuffle = False
+            return torch.utils.data.DataLoader(
+                dataset=dataset,
+                batch_size=None,
+                collate_fn=dataset.collate_fn,
+                num_workers=config.get('num_workers', 0),
+                pin_memory=config.get('pin_memory', False),
+                worker_init_fn=worker_init_fn,
+        )
         else:
             if 'manifest_filepath' in config and config['manifest_filepath'] is None:
                 logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
