@@ -12,3 +12,6 @@ gdown
 megatron-lm==1.1.5
 inflect
 sacrebleu[ja]
+sacremoses
+pangu
+jieba
