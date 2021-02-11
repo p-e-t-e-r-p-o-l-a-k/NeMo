@@ -266,13 +266,11 @@ class _AudioTextEffectiveDataset(IterableDataset):
     ):
         self.parser = parser
 
-        self.collection = collections.ASRAudioText(
-            manifests_files=manifest_filepath.split(','),
-            parser=parser,
-            min_duration=min_duration,
-            max_duration=max_duration,
-            max_number=max_utts,
-        )
+        self.collection = []
+        for manifest in manifest_filepath.split(','):
+            for line in open(manifest).readlines():
+                self.collection.append(json.loads(line))
+        shuffle(self.collection)  
 
         self.featurizer = WaveformFeaturizer(sample_rate=sample_rate, int_values=int_values, augmentor=augmentor)
         self.trim = trim
@@ -291,17 +289,19 @@ class _AudioTextEffectiveDataset(IterableDataset):
             cnt = 0
             batch = []
             for item in buffer:
-                m = max(item.duration, m)
-                cnt += 1
-                if m * cnt <= self.batch_size * self.max_duration:
+                m2 = max(item['duration'], m)
+                cnt2 = cnt + 1
+                if m2 * cnt2 <= self.batch_size * self.max_duration:
                     batch.append(item)
+                    m, cnt = m2, cnt2
                 else:
-                    yield batch, m * cnt
+                    logging.info("Padding {}%".format(sum([m - item['duration'] for item in batch]) / (m * cnt)))
+                    yield batch, m * cnt, sum([m - item['duration'] for item in batch]) / (m * cnt)
                     batch = [item,]
                     cnt = 1
-                    m = item.duration
+                    m = item['duration']
             if m * cnt > 0:
-                yield batch, m * cnt
+                yield batch, m * cnt, sum([m - item['duration'] for item in batch]) / (m * cnt)
 
         shuffle(self.collection)
         rest = []
@@ -309,27 +309,32 @@ class _AudioTextEffectiveDataset(IterableDataset):
             buffer = self.collection[idx:idx + self.buffer_size]
             buffer.extend(rest)
             rest = []
-            buffer = sorted(buffer, key=attrgetter('duration'))
-            for batch, size in make_batches(buffer):
-                if self.batch_size * self.max_duration * 0.8 <= size:
+            buffer = sorted(buffer, key=lambda i: i['duration'])
+            batches = list(make_batches(buffer))
+            shuffle(batches)
+            for batch, size, padding in batches:
+                if padding <= 0.05 and self.batch_size * self.max_duration * 0.8 <= size:
                     yield list(map(self._getitem, batch))
-                rest.extend(batch)
+                else:
+                    rest.extend(batch)
 
     def _getitem(self, sample):
+        get = lambda n: sample[n] if n in sample.keys() else None 
         if self.load_audio:
-            offset = sample.offset
+            offset = get('offset')
 
             if offset is None:
                 offset = 0
 
             features = self.featurizer.process(
-                sample.audio_file, offset=offset, duration=sample.duration, trim=self.trim, orig_sr=sample.orig_sr
+                get('audio_filepath'), offset=offset, duration=get('duration'), trim=self.trim, orig_sr=get('orig_sr')
             )
             f, fl = features, torch.tensor(features.shape[0]).long()
         else:
             f, fl = None, None
 
-        t, tl = sample.text_tokens, len(sample.text_tokens)
+        text_tokens = self.parser(get('text'))
+        t, tl = text_tokens, len(text_tokens)
         if self.bos_id is not None:
             t = [self.bos_id] + t
             tl += 1
@@ -341,9 +346,9 @@ class _AudioTextEffectiveDataset(IterableDataset):
 
         if self._add_misc:
             misc = dict()
-            misc['id'] = sample.id
-            misc['text_raw'] = sample.text_raw
-            misc['speaker'] = sample.speaker
+            misc['id'] = get('id')
+            misc['text_raw'] = get('text')
+            misc['speaker'] = get('speaker')
             output = (output, misc)
 
         return output
@@ -353,7 +358,7 @@ class _AudioTextEffectiveDataset(IterableDataset):
 
 s = None
 
-class _AudioTextRollingBufferDataset(Dataset):
+class _AudioTextRollingBufferDataset(IterableDataset):
     """
     Dataset that loads tensors via a json file containing paths to audio files, transcripts, and durations (in seconds).
     Each new line is a different sample. Example below:
@@ -396,8 +401,6 @@ class _AudioTextRollingBufferDataset(Dataset):
             'transcript_length': NeuralType(tuple('B'), LengthsType()),
         }
 
-    queue = queue.Queue(maxsize=256)
-
     def worker_init_fn(self, worker_id):
         worker_info = torch.utils.data.get_worker_info()
         dataset = worker_info.dataset
@@ -420,7 +423,8 @@ class _AudioTextRollingBufferDataset(Dataset):
         pad_id: int = 0,
         load_audio: bool = True,
         add_misc: bool = False,
-        buffer_size: int = None,
+        buffer_size: int = 2000,
+        batch_size: int = 128,
     ):
         if parser == 'en':
             parser = parsers.CharParser()
@@ -435,6 +439,7 @@ class _AudioTextRollingBufferDataset(Dataset):
         )'''
 
         self.buffer_size = buffer_size
+        self.queue = queue.Queue(maxsize=buffer_size)
 
         assert 'BUFFER_IP' in os.environ.keys()
         assert 'BUFFER_PORT' in os.environ.keys()
@@ -448,6 +453,9 @@ class _AudioTextRollingBufferDataset(Dataset):
         self.pad_id = pad_id
         self.load_audio = load_audio
         self._add_misc = add_misc
+        self.buffer_size = buffer_size
+        self.batch_size = batch_size
+        self.max_duration = max_duration if max_duration is not None else 16.7
 
     def start_client(self):
         self.t = threading.Thread(target=self.client)
@@ -476,31 +484,60 @@ class _AudioTextRollingBufferDataset(Dataset):
                     data = recv(sock, datalen)
                     data = data.decode('utf-8')
                     data = json.loads(data)
-                    _AudioTextRollingBufferDataset.queue.put(data)
+                    self.queue.put(data)
                 except:
                     break
 
-    def __getitem__(self, index):
-        data = _AudioTextRollingBufferDataset.queue.get()
-        text = data['text'].lower()
-        audio_file = data['audio_filepath']
-        text_tokens = self.parser(text)
+    def __iter__(self):
+        def make_batches(buffer):
+            m = 0
+            cnt = 0
+            batch = []
+            for item in buffer:
+                m2 = max(item['duration'], m)
+                cnt2 = cnt + 1
+                if m2 * cnt2 <= self.batch_size * self.max_duration:
+                    batch.append(item)
+                    m, cnt = m2, cnt2
+                else:
+                    logging.info("Padding {}%".format(sum([m - item['duration'] for item in batch]) / (m * cnt)))
+                    yield batch, m * cnt, sum([m - item['duration'] for item in batch]) / (m * cnt)
+                    batch = [item,]
+                    cnt = 1
+                    m = item['duration']
+            if m * cnt > 0:
+                yield batch, m * cnt, sum([m - item['duration'] for item in batch]) / (m * cnt)
 
+        rest = []
+        while True:
+            buffer = [self.queue.get() for _ in range(self.buffer_size)]
+            buffer.extend(rest)
+            rest = []
+            buffer = sorted(buffer, key=lambda i: i['duration'])
+            batches = list(make_batches(buffer))
+            shuffle(batches)
+            for batch, size, padding in batches:
+                if padding <= 0.05 and self.batch_size * self.max_duration * 0.8 <= size:
+                    yield list(map(self._getitem, batch))
+                else:
+                    rest.extend(batch)
+
+    def _getitem(self, sample):
+        get = lambda n: sample[n] if n in sample.keys() else None 
         if self.load_audio:
-            
-            offset = 0
+            offset = get('offset')
+
+            if offset is None:
+                offset = 0
 
             features = self.featurizer.process(
-                audio_file, offset=offset, duration=0, trim=self.trim,
+                get('audio_filepath'), offset=offset, duration=get('duration'), trim=self.trim, orig_sr=get('orig_sr')
             )
-            try:
-                os.remove(audio_file)
-            except:
-                print(audio_file)
             f, fl = features, torch.tensor(features.shape[0]).long()
         else:
             f, fl = None, None
 
+        text_tokens = self.parser(get('text'))
         t, tl = text_tokens, len(text_tokens)
         if self.bos_id is not None:
             t = [self.bos_id] + t
@@ -513,15 +550,12 @@ class _AudioTextRollingBufferDataset(Dataset):
 
         if self._add_misc:
             misc = dict()
-            misc['id'] = None
-            misc['text_raw'] = text
-            misc['speaker'] = None
+            misc['id'] = get('id')
+            misc['text_raw'] = get('text')
+            misc['speaker'] = get('speaker')
             output = (output, misc)
 
         return output
-
-    def __len__(self):
-        return self.buffer_size
 
     def _collate_fn(self, batch):
         return _speech_collate_fn(batch, pad_id=self.pad_id)
@@ -618,7 +652,6 @@ class AudioToCharDataset(_AudioTextDataset):
             add_misc=add_misc,
         )
 
-@experimental
 class AudioToCharEffectiveDataset(_AudioTextEffectiveDataset):
     """
     Dataset that loads tensors via a json file containing paths to audio
@@ -720,9 +753,8 @@ class AudioToCharEffectiveDataset(_AudioTextEffectiveDataset):
         num_workers = worker_info.num_workers
         dataset = worker_info.dataset
         step = len(dataset.collection) // num_workers
-        dataset.collection = dataset.collection[step * worker_id, step * (worker_id + 1)]
+        dataset.collection = dataset.collection[step * worker_id: step * (worker_id + 1)]
 
-@experimental
 class AudioToCharRollingBufferDataset(_AudioTextRollingBufferDataset):
     """
     Dataset that loads tensors via a json file containing paths to audio

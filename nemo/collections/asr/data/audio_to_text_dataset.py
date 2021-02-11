@@ -109,7 +109,8 @@ def get_rolling_buffer_dataset(config: dict, augmentor: Optional['AudioAugmentor
         load_audio=config.get('load_audio', True),
         parser=config.get('parser', 'en'),
         add_misc=config.get('add_misc', False),
-        buffer_size=config.get('buffer_size', None),
+        buffer_size=config.get('buffer_size', 2000),
+        batch_size=config.get('batch_size', 128),
     )
     return dataset
 
