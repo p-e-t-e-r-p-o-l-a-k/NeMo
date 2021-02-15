@@ -439,7 +439,7 @@ class _AudioTextRollingBufferDataset(IterableDataset):
         )'''
 
         self.buffer_size = buffer_size
-        self.queue = queue.Queue(maxsize=buffer_size)
+        self.queue = queue.Queue(maxsize=2*buffer_size)
 
         assert 'BUFFER_IP' in os.environ.keys()
         assert 'BUFFER_PORT' in os.environ.keys()
@@ -500,7 +500,9 @@ class _AudioTextRollingBufferDataset(IterableDataset):
                     batch.append(item)
                     m, cnt = m2, cnt2
                 else:
-                    logging.info("Padding {}%".format(sum([m - item['duration'] for item in batch]) / (m * cnt)))
+                    dur = sum([item['duration'] for item in batch])
+                    pad = sum([m - item['duration'] for item in batch])
+                    logging.info("{} {} {} Padding {}%".format(len(batch), m * cnt, dur, pad / (m * cnt)))
                     yield batch, m * cnt, sum([m - item['duration'] for item in batch]) / (m * cnt)
                     batch = [item,]
                     cnt = 1
@@ -517,7 +519,7 @@ class _AudioTextRollingBufferDataset(IterableDataset):
             batches = list(make_batches(buffer))
             shuffle(batches)
             for batch, size, padding in batches:
-                if padding <= 0.05 and self.batch_size * self.max_duration * 0.8 <= size:
+                if padding <= 0.2 and self.batch_size * self.max_duration * 0.8 <= size:
                     yield list(map(self._getitem, batch))
                 else:
                     rest.extend(batch)
@@ -533,7 +535,11 @@ class _AudioTextRollingBufferDataset(IterableDataset):
             features = self.featurizer.process(
                 get('audio_filepath'), offset=offset, duration=get('duration'), trim=self.trim, orig_sr=get('orig_sr')
             )
-            f, fl = features, torch.tensor(features.shape[0]).long()
+            f, fl = features, torch.tensor(features.shape[0]).long()            
+            try:
+                os.remove(get('audio_filepath'))
+            except:
+                pass
         else:
             f, fl = None, None
 
@@ -824,6 +830,7 @@ class AudioToCharRollingBufferDataset(_AudioTextRollingBufferDataset):
         parser: Union[str, Callable] = 'en',
         add_misc: bool = False,
         buffer_size: int = None,
+        batch_size: int = None,
     ):
         self.labels = labels
 
@@ -847,6 +854,7 @@ class AudioToCharRollingBufferDataset(_AudioTextRollingBufferDataset):
             load_audio=load_audio,
             add_misc=add_misc,
             buffer_size=buffer_size,
+            batch_size=batch_size,
         )
 
 class AudioToCharWithDursDataset(AudioToCharDataset):
