@@ -270,7 +270,6 @@ class _AudioTextEffectiveDataset(IterableDataset):
         for manifest in manifest_filepath.split(','):
             for line in open(manifest).readlines():
                 self.collection.append(json.loads(line))
-        shuffle(self.collection)  
 
         self.featurizer = WaveformFeaturizer(sample_rate=sample_rate, int_values=int_values, augmentor=augmentor)
         self.trim = trim
@@ -295,7 +294,9 @@ class _AudioTextEffectiveDataset(IterableDataset):
                     batch.append(item)
                     m, cnt = m2, cnt2
                 else:
-                    logging.info("Padding {}%".format(sum([m - item['duration'] for item in batch]) / (m * cnt)))
+                    dur = sum([item['duration'] for item in batch])
+                    pad = sum([m - item['duration'] for item in batch])
+                    logging.info("{} {} {} Padding {}%".format(len(batch), m * cnt, dur, pad / (m * cnt)))
                     yield batch, m * cnt, sum([m - item['duration'] for item in batch]) / (m * cnt)
                     batch = [item,]
                     cnt = 1
@@ -305,11 +306,13 @@ class _AudioTextEffectiveDataset(IterableDataset):
 
         shuffle(self.collection)
         rest = []
+        reverse = False
         for idx in range(0, len(self.collection), self.buffer_size):
             buffer = self.collection[idx:idx + self.buffer_size]
             buffer.extend(rest)
             rest = []
-            buffer = sorted(buffer, key=lambda i: i['duration'])
+            buffer = sorted(buffer, key=lambda i: i['duration'], reverse=reverse)
+            reverse = not reverse
             batches = list(make_batches(buffer))
             shuffle(batches)
             for batch, size, padding in batches:
@@ -511,11 +514,13 @@ class _AudioTextRollingBufferDataset(IterableDataset):
                 yield batch, m * cnt, sum([m - item['duration'] for item in batch]) / (m * cnt)
 
         rest = []
+        reverse = False
         while True:
             buffer = [self.queue.get() for _ in range(self.buffer_size)]
             buffer.extend(rest)
             rest = []
-            buffer = sorted(buffer, key=lambda i: i['duration'])
+            buffer = sorted(buffer, key=lambda i: i['duration'], reverse=reverse)
+            reverse = not reverse
             batches = list(make_batches(buffer))
             shuffle(batches)
             for batch, size, padding in batches:
@@ -758,8 +763,7 @@ class AudioToCharEffectiveDataset(_AudioTextEffectiveDataset):
         worker_info = torch.utils.data.get_worker_info()
         num_workers = worker_info.num_workers
         dataset = worker_info.dataset
-        step = len(dataset.collection) // num_workers
-        dataset.collection = dataset.collection[step * worker_id: step * (worker_id + 1)]
+        dataset.collection = dataset.collection[worker_id::num_workers]
 
 class AudioToCharRollingBufferDataset(_AudioTextRollingBufferDataset):
     """
