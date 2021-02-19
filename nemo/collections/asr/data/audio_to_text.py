@@ -12,15 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import io
-from operator import attrgetter
+import itertools
 import os
-import time
+import random
 from typing import Callable, Dict, List, Optional, Union
 import socket
 import struct
 import json
 import threading
 import queue
+import itertools
 
 import braceexpand
 import torch
@@ -83,6 +84,30 @@ def _speech_collate_fn(batch, pad_id):
 
     return audio_signal, audio_lengths, tokens, tokens_lengths
 
+def _make_batches(buffer, max_size):
+    max_len = 0
+    cnt = 0
+    batch = []
+    for item in buffer:
+        max_len_new = max(item['duration'], max_len)
+        cnt_new = cnt + 1
+        if max_len_new * cnt_new <= max_size:
+            batch.append(item)
+            max_len, cnt = max_len_new, cnt_new
+        else:
+            dur = sum([item['duration'] for item in batch])
+            pad = sum([max_len - item['duration'] for item in batch])
+
+            logging.info("{} {} {} Padding {}%".format(len(batch), max_len * cnt, dur, pad / (max_len * cnt)))
+
+            yield batch, max_len * cnt, pad / (max_len * cnt)
+
+            batch = [item,]
+            cnt = 1
+            max_len = item['duration']
+
+    if max_len * cnt > 0:
+        yield batch, max_len * cnt, sum([max_len - item['duration'] for item in batch]) / (max_len * cnt)
 
 class _AudioTextDataset(Dataset):
     """
@@ -266,10 +291,12 @@ class _AudioTextEffectiveDataset(IterableDataset):
     ):
         self.parser = parser
 
-        self.collection = []
+        self.collections = []
         for manifest in manifest_filepath.split(','):
+            collection = []
             for line in open(manifest).readlines():
-                self.collection.append(json.loads(line))
+                collection.append(json.loads(line))
+            self.collections.append(collection)
 
         self.featurizer = WaveformFeaturizer(sample_rate=sample_rate, int_values=int_values, augmentor=augmentor)
         self.trim = trim
@@ -283,40 +310,22 @@ class _AudioTextEffectiveDataset(IterableDataset):
         self.max_duration = max_duration if max_duration is not None else 16.7
 
     def __iter__(self):
-        def make_batches(buffer):
-            m = 0
-            cnt = 0
-            batch = []
-            for item in buffer:
-                m2 = max(item['duration'], m)
-                cnt2 = cnt + 1
-                if m2 * cnt2 <= self.batch_size * self.max_duration:
-                    batch.append(item)
-                    m, cnt = m2, cnt2
-                else:
-                    dur = sum([item['duration'] for item in batch])
-                    pad = sum([m - item['duration'] for item in batch])
-                    logging.info("{} {} {} Padding {}%".format(len(batch), m * cnt, dur, pad / (m * cnt)))
-                    yield batch, m * cnt, sum([m - item['duration'] for item in batch]) / (m * cnt)
-                    batch = [item,]
-                    cnt = 1
-                    m = item['duration']
-            if m * cnt > 0:
-                yield batch, m * cnt, sum([m - item['duration'] for item in batch]) / (m * cnt)
-
-        shuffle(self.collection)
+        max_len = self.max_duration * self.batch_size
+        for coll in self.collections:
+            shuffle(coll)
+        collection = [val for tup in itertools.zip_longest(*self.collections) for val in tup if val is not None]
         rest = []
         reverse = False
-        for idx in range(0, len(self.collection), self.buffer_size):
-            buffer = self.collection[idx:idx + self.buffer_size]
+        for idx in range(0, len(collection), self.buffer_size):
+            buffer = collection[idx:idx + self.buffer_size]
             buffer.extend(rest)
             rest = []
             buffer = sorted(buffer, key=lambda i: i['duration'], reverse=reverse)
             reverse = not reverse
-            batches = list(make_batches(buffer))
+            batches = list(_make_batches(buffer, max_len))
             shuffle(batches)
-            for batch, size, padding in batches:
-                if padding <= 0.05 and self.batch_size * self.max_duration * 0.8 <= size:
+            for batch, size, _ in batches:
+                if max_len * 0.9 <= size:
                     yield list(map(self._getitem, batch))
                 else:
                     rest.extend(batch)
@@ -358,8 +367,6 @@ class _AudioTextEffectiveDataset(IterableDataset):
 
     def _collate_fn(self, batch):
         return _speech_collate_fn(batch, pad_id=self.pad_id)
-
-s = None
 
 class _AudioTextRollingBufferDataset(IterableDataset):
     """
@@ -406,9 +413,21 @@ class _AudioTextRollingBufferDataset(IterableDataset):
 
     def worker_init_fn(self, worker_id):
         worker_info = torch.utils.data.get_worker_info()
+        num_workers = worker_info.num_workers
         dataset = worker_info.dataset
+        max_len = 0
+
+        for i, col in enumerate(dataset.collections):
+            dataset.collections[i] = col[worker_id::num_workers]
+            max_len = max(len(dataset.collections[i]), max_len)
+            
+        for i, col in enumerate(dataset.collections):
+            dataset.collections[i].extend(
+                random.sample(col, max_len - len(col))
+            )
+        
         dataset.start_client()
-        print(f'Client started in {worker_id}')
+        logging.info(f'Client started in {worker_id}/{num_workers}')
 
     def __init__(
         self,
@@ -433,13 +452,12 @@ class _AudioTextRollingBufferDataset(IterableDataset):
             parser = parsers.CharParser()
         self.parser = parser
 
-        '''self.collection = collections.ASRAudioText(
-            manifests_files=manifest_filepath.split(','),
-            parser=parser,
-            min_duration=min_duration,
-            max_duration=max_duration,
-            max_number=max_utts,
-        )'''
+        self.collections = []
+        for manifest in manifest_filepath.split(','):
+            collection = []
+            for line in open(manifest).readlines():
+                collection.append(json.loads(line))
+            self.collections.append(collection)
 
         self.buffer_size = buffer_size
         self.queue = queue.Queue(maxsize=2*buffer_size)
@@ -487,44 +505,38 @@ class _AudioTextRollingBufferDataset(IterableDataset):
                     data = recv(sock, datalen)
                     data = data.decode('utf-8')
                     data = json.loads(data)
+                    data['buffer'] = True
                     self.queue.put(data)
                 except:
                     break
 
     def __iter__(self):
-        def make_batches(buffer):
-            m = 0
-            cnt = 0
+        max_size = self.batch_size * self.max_duration
+        
+        for coll in self.collections:
+            shuffle(coll)
+        collection = [val for tup in itertools.zip_longest(*self.collections) for val in tup if val is not None]
+        def batchify(coll, size):
             batch = []
-            for item in buffer:
-                m2 = max(item['duration'], m)
-                cnt2 = cnt + 1
-                if m2 * cnt2 <= self.batch_size * self.max_duration:
-                    batch.append(item)
-                    m, cnt = m2, cnt2
-                else:
-                    dur = sum([item['duration'] for item in batch])
-                    pad = sum([m - item['duration'] for item in batch])
-                    logging.info("{} {} {} Padding {}%".format(len(batch), m * cnt, dur, pad / (m * cnt)))
-                    yield batch, m * cnt, sum([m - item['duration'] for item in batch]) / (m * cnt)
-                    batch = [item,]
-                    cnt = 1
-                    m = item['duration']
-            if m * cnt > 0:
-                yield batch, m * cnt, sum([m - item['duration'] for item in batch]) / (m * cnt)
+            for item in itertools.cycle(coll):
+                batch.append(item)
+                if len(batch) == size:
+                    yield batch
+                    batch = []
+
 
         rest = []
         reverse = False
-        while True:
-            buffer = [self.queue.get() for _ in range(self.buffer_size)]
+        for buffer in batchify(collection, self.buffer_size // 2):
+            buffer.extend([self.queue.get() for _ in range(self.buffer_size // 2)]) 
             buffer.extend(rest)
             rest = []
             buffer = sorted(buffer, key=lambda i: i['duration'], reverse=reverse)
             reverse = not reverse
-            batches = list(make_batches(buffer))
+            batches = list(_make_batches(buffer, max_size))
             shuffle(batches)
-            for batch, size, padding in batches:
-                if padding <= 0.2 and self.batch_size * self.max_duration * 0.8 <= size:
+            for batch, size, _ in batches:
+                if max_size * 0.9 <= size:
                     yield list(map(self._getitem, batch))
                 else:
                     rest.extend(batch)
@@ -542,7 +554,8 @@ class _AudioTextRollingBufferDataset(IterableDataset):
             )
             f, fl = features, torch.tensor(features.shape[0]).long()            
             try:
-                os.remove(get('audio_filepath'))
+                if get('buffer'):
+                    os.remove(get('audio_filepath'))
             except:
                 pass
         else:
@@ -763,7 +776,17 @@ class AudioToCharEffectiveDataset(_AudioTextEffectiveDataset):
         worker_info = torch.utils.data.get_worker_info()
         num_workers = worker_info.num_workers
         dataset = worker_info.dataset
-        dataset.collection = dataset.collection[worker_id::num_workers]
+        max_len = 0
+
+        for i, col in enumerate(dataset.collections):
+            dataset.collections[i] = col[worker_id::num_workers]
+            max_len = max(len(dataset.collections[i]), max_len)
+            
+        for i, col in enumerate(dataset.collections):
+            dataset.collections[i].extend(
+                random.sample(col, max_len - len(col))
+            )
+
 
 class AudioToCharRollingBufferDataset(_AudioTextRollingBufferDataset):
     """
@@ -860,6 +883,21 @@ class AudioToCharRollingBufferDataset(_AudioTextRollingBufferDataset):
             buffer_size=buffer_size,
             batch_size=batch_size,
         )
+
+    def worker_init_fn(self, worker_id):
+        worker_info = torch.utils.data.get_worker_info()
+        num_workers = worker_info.num_workers
+        dataset = worker_info.dataset
+        max_len = 0
+
+        for i, col in enumerate(dataset.collections):
+            dataset.collections[i] = col[worker_id::num_workers]
+            max_len = max(len(dataset.collections[i]), max_len)
+            
+        for i, col in enumerate(dataset.collections):
+            dataset.collections[i].extend(
+                random.sample(col, max_len - len(col))
+            )
 
 class AudioToCharWithDursDataset(AudioToCharDataset):
     """
