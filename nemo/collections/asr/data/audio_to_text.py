@@ -884,21 +884,6 @@ class AudioToCharRollingBufferDataset(_AudioTextRollingBufferDataset):
             batch_size=batch_size,
         )
 
-    def worker_init_fn(self, worker_id):
-        worker_info = torch.utils.data.get_worker_info()
-        num_workers = worker_info.num_workers
-        dataset = worker_info.dataset
-        max_len = 0
-
-        for i, col in enumerate(dataset.collections):
-            dataset.collections[i] = col[worker_id::num_workers]
-            max_len = max(len(dataset.collections[i]), max_len)
-            
-        for i, col in enumerate(dataset.collections):
-            dataset.collections[i].extend(
-                random.sample(col, max_len - len(col))
-            )
-
 class AudioToCharWithDursDataset(AudioToCharDataset):
     """
     Dataset that loads tensors via a json file containing paths to audio
