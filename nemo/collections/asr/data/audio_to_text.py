@@ -45,7 +45,7 @@ __all__ = [
 ]
 
 
-def _speech_collate_fn(batch, pad_id):
+def _speech_collate_fn(batch, pad_id, train_pad=False):
     """collate batch of audio sig, audio len, tokens, tokens len
     Args:
         batch (Optional[FloatTensor], Optional[LongTensor], LongTensor,
@@ -65,8 +65,15 @@ def _speech_collate_fn(batch, pad_id):
         if has_audio:
             sig_len = sig_len.item()
             if sig_len < max_audio_len:
+                mode = 'constant'
+                if train_pad:
+                    mode = 'circular'
+                    repeats = max_audio_len // sig_len
+                    if repeats > 0:
+                        sig = torch.cat(repeats * [sig,])
+                        sig_len *= repeats
                 pad = (0, max_audio_len - sig_len)
-                sig = torch.nn.functional.pad(sig, pad)
+                sig = torch.nn.functional.pad(sig, pad, mode=mode)
             audio_signal.append(sig)
         tokens_i_len = tokens_i_len.item()
         if tokens_i_len < max_tokens_len:
@@ -91,7 +98,7 @@ def _make_batches(buffer, max_size):
     for item in buffer:
         max_len_new = max(item['duration'], max_len)
         cnt_new = cnt + 1
-        if max_len_new * cnt_new <= max_size:
+        if cnt_new <= max_size:
             batch.append(item)
             max_len, cnt = max_len_new, cnt_new
         else:
@@ -106,7 +113,7 @@ def _make_batches(buffer, max_size):
             cnt = 1
             max_len = item['duration']
 
-    if max_len * cnt > 0:
+    if cnt > 0:
         yield batch, max_len * cnt, sum([max_len - item['duration'] for item in batch]) / (max_len * cnt)
 
 class _AudioTextDataset(Dataset):
@@ -310,7 +317,7 @@ class _AudioTextEffectiveDataset(IterableDataset):
         self.max_duration = max_duration if max_duration is not None else 16.7
 
     def __iter__(self):
-        max_len = self.max_duration * self.batch_size
+        max_len = self.batch_size
         for coll in self.collections:
             shuffle(coll)
         collection = [val for tup in itertools.zip_longest(*self.collections) for val in tup if val is not None]
@@ -324,8 +331,8 @@ class _AudioTextEffectiveDataset(IterableDataset):
             reverse = not reverse
             batches = list(_make_batches(buffer, max_len))
             shuffle(batches)
-            for batch, size, _ in batches:
-                if max_len * 0.9 <= size:
+            for batch, _, _ in batches:
+                if max_len == len(batch):
                     yield list(map(self._getitem, batch))
                 else:
                     rest.extend(batch)
@@ -366,7 +373,7 @@ class _AudioTextEffectiveDataset(IterableDataset):
         return output
 
     def _collate_fn(self, batch):
-        return _speech_collate_fn(batch, pad_id=self.pad_id)
+        return _speech_collate_fn(batch, pad_id=self.pad_id, train_pad=True)
 
 class _AudioTextRollingBufferDataset(IterableDataset):
     """
@@ -511,7 +518,7 @@ class _AudioTextRollingBufferDataset(IterableDataset):
                     break
 
     def __iter__(self):
-        max_size = self.batch_size * self.max_duration
+        max_size = self.batch_size
         
         for coll in self.collections:
             shuffle(coll)
@@ -535,8 +542,8 @@ class _AudioTextRollingBufferDataset(IterableDataset):
             reverse = not reverse
             batches = list(_make_batches(buffer, max_size))
             shuffle(batches)
-            for batch, size, _ in batches:
-                if max_size * 0.9 <= size:
+            for batch, _, _ in batches:
+                if max_size == len(batch):
                     yield list(map(self._getitem, batch))
                 else:
                     rest.extend(batch)
@@ -582,7 +589,7 @@ class _AudioTextRollingBufferDataset(IterableDataset):
         return output
 
     def _collate_fn(self, batch):
-        return _speech_collate_fn(batch, pad_id=self.pad_id)
+        return _speech_collate_fn(batch, pad_id=self.pad_id, train_pad=True)
 
 class AudioToCharDataset(_AudioTextDataset):
     """
