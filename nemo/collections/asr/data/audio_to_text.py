@@ -98,7 +98,7 @@ def _make_batches(buffer, max_size):
     for item in buffer:
         max_len_new = max(item['duration'], max_len)
         cnt_new = cnt + 1
-        if cnt_new * max_len_new <= max_size:
+        if cnt_new <= max_size:
             batch.append(item)
             max_len, cnt = max_len_new, cnt_new
         else:
@@ -317,7 +317,7 @@ class _AudioTextEffectiveDataset(IterableDataset):
         self.max_duration = max_duration if max_duration is not None else 16.7
 
     def __iter__(self):
-        max_len = self.batch_size * self.max_duration
+        max_len = self.batch_size
         for coll in self.collections:
             shuffle(coll)
         collection = [val for tup in itertools.zip_longest(*self.collections) for val in tup if val is not None]
@@ -331,8 +331,8 @@ class _AudioTextEffectiveDataset(IterableDataset):
             reverse = not reverse
             batches = list(_make_batches(buffer, max_len))
             shuffle(batches)
-            for batch, s, _ in batches:
-                if max_len * 0.9 <= s:
+            for batch, _, _ in batches:
+                if max_len == len(batch):
                     yield list(map(self._getitem, batch))
                 else:
                     rest.extend(batch)
@@ -518,7 +518,7 @@ class _AudioTextRollingBufferDataset(IterableDataset):
                     break
 
     def __iter__(self):
-        max_size = self.batch_size * self.max_duration
+        max_size = self.batch_size
         
         for coll in self.collections:
             shuffle(coll)
@@ -542,8 +542,8 @@ class _AudioTextRollingBufferDataset(IterableDataset):
             reverse = not reverse
             batches = list(_make_batches(buffer, max_size))
             shuffle(batches)
-            for batch, s, _ in batches:
-                if max_size * 0.9 <= s:
+            for batch, _, _ in batches:
+                if max_size == len(batch):
                     yield list(map(self._getitem, batch))
                 else:
                     rest.extend(batch)
