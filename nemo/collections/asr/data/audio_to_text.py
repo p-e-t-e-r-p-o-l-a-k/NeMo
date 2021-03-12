@@ -65,15 +65,8 @@ def _speech_collate_fn(batch, pad_id, train_pad=False):
         if has_audio:
             sig_len = sig_len.item()
             if sig_len < max_audio_len:
-                mode = 'constant'
-                if train_pad:
-                    mode = 'circular'
-                    repeats = max_audio_len // sig_len
-                    if repeats > 0:
-                        sig = torch.cat(repeats * [sig,])
-                        sig_len *= repeats
                 pad = (0, max_audio_len - sig_len)
-                sig = torch.nn.functional.pad(sig, pad, mode=mode)
+                sig = torch.nn.functional.pad(sig, pad)
             audio_signal.append(sig)
         tokens_i_len = tokens_i_len.item()
         if tokens_i_len < max_tokens_len:
@@ -512,6 +505,8 @@ class _AudioTextRollingBufferDataset(IterableDataset):
                     data = recv(sock, datalen)
                     data = data.decode('utf-8')
                     data = json.loads(data)
+                    if data['duration'] > self.max_duration:
+                        os.remove(data['audio_filepath'])
                     data['buffer'] = True
                     self.queue.put(data)
                 except:
