@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import itertools
+import json
 import pickle
 import random
 from pathlib import Path
@@ -39,7 +40,7 @@ from nemo.collections.nlp.modules.common import TokenClassifier
 from nemo.collections.nlp.modules.common.lm_utils import get_transformer
 from nemo.collections.nlp.modules.common.tokenizer_utils import get_nmt_tokenizer
 from nemo.collections.nlp.modules.common.transformer import BeamSearchSequenceGenerator
-from nemo.core.classes.common import typecheck
+from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.utils import logging, model_utils
 
 __all__ = ['MTEncDecModel']
@@ -316,14 +317,27 @@ class MTEncDecModel(EncDecNLPModel):
             dataset = pickle.load(open(cfg.src_file_name, 'rb'))
             dataset.reverse_lang_direction = cfg.get("reverse_lang_direction", False)
         elif cfg.get("use_tarred_dataset", False):
-            if cfg.get('tar_files') is None:
-                raise FileNotFoundError("Could not find tarred dataset.")
-            logging.info(f'Loading from tarred dataset {cfg.get("tar_files")}')
-            if cfg.get("metadata_file", None) is None:
-                raise FileNotFoundError("Could not find metadata path in config")
+            if cfg.get("metadata_file") is None:
+                raise FileNotFoundError("Trying to use tarred data set but could not find metadata path in config.")
+            else:
+                metadata_file = cfg.get('metadata_file')
+                with open(metadata_file) as metadata_reader:
+                    metadata = json.load(metadata_reader)
+                if cfg.get('tar_files') is None:
+                    tar_files = metadata.get('tar_files')
+                    if tar_files is not None:
+                        logging.info(f'Loading from tarred dataset {tar_files}')
+                    else:
+                        raise FileNotFoundError("Could not find tarred dataset in config or metadata.")
+                else:
+                    tar_files = cfg.get('tar_files')
+                    if metadata_file.get('tar_files') is not None:
+                        raise ValueError(
+                            'Tar files specified in config and in metadata file. Tar files should only be specified once.'
+                        )
             dataset = TarredTranslationDataset(
-                text_tar_filepaths=cfg.tar_files,
-                metadata_path=cfg.metadata_file,
+                text_tar_filepaths=tar_files,
+                metadata_path=metadata_file,
                 encoder_tokenizer=self.encoder_tokenizer,
                 decoder_tokenizer=self.decoder_tokenizer,
                 shuffle_n=cfg.get("tar_shuffle_n", 100),
@@ -463,4 +477,81 @@ class MTEncDecModel(EncDecNLPModel):
 
     @classmethod
     def list_available_models(cls) -> Optional[Dict[str, str]]:
-        pass
+        """
+        This method returns a list of pre-trained model which can be instantiated directly from NVIDIA's NGC cloud.
+
+        Returns:
+            List of available pre-trained models.
+        """
+        result = []
+        model = PretrainedModelInfo(
+            pretrained_model_name="nmt_en_de_transformer12x2",
+            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/nmt_en_de_transformer12x2/versions/1.0.0rc1/files/nmt_en_de_transformer12x2.nemo",
+            description="En->De translation model. See details here: https://ngc.nvidia.com/catalog/models/nvidia:nemo:nmt_en_de_transformer12x2",
+        )
+        result.append(model)
+
+        model = PretrainedModelInfo(
+            pretrained_model_name="nmt_de_en_transformer12x2",
+            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/nmt_de_en_transformer12x2/versions/1.0.0rc1/files/nmt_de_en_transformer12x2.nemo",
+            description="De->En translation model. See details here: https://ngc.nvidia.com/catalog/models/nvidia:nemo:nmt_de_en_transformer12x2",
+        )
+        result.append(model)
+
+        model = PretrainedModelInfo(
+            pretrained_model_name="nmt_en_es_transformer12x2",
+            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/nmt_en_es_transformer12x2/versions/1.0.0rc1/files/nmt_en_es_transformer12x2.nemo",
+            description="En->Es translation model. See details here: https://ngc.nvidia.com/catalog/models/nvidia:nemo:nmt_en_es_transformer12x2",
+        )
+        result.append(model)
+
+        model = PretrainedModelInfo(
+            pretrained_model_name="nmt_es_en_transformer12x2",
+            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/nmt_es_en_transformer12x2/versions/1.0.0rc1/files/nmt_es_en_transformer12x2.nemo",
+            description="Es->En translation model. See details here: https://ngc.nvidia.com/catalog/models/nvidia:nemo:nmt_es_en_transformer12x2",
+        )
+        result.append(model)
+
+        model = PretrainedModelInfo(
+            pretrained_model_name="nmt_en_fr_transformer12x2",
+            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/nmt_en_fr_transformer12x2/versions/1.0.0rc1/files/nmt_en_fr_transformer12x2.nemo",
+            description="En->Fr translation model. See details here: https://ngc.nvidia.com/catalog/models/nvidia:nemo:nmt_en_fr_transformer12x2",
+        )
+        result.append(model)
+
+        model = PretrainedModelInfo(
+            pretrained_model_name="nmt_fr_en_transformer12x2",
+            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/nmt_fr_en_transformer12x2/versions/1.0.0rc1/files/nmt_fr_en_transformer12x2.nemo",
+            description="Fr->En translation model. See details here: https://ngc.nvidia.com/catalog/models/nvidia:nemo:nmt_fr_en_transformer12x2",
+        )
+        result.append(model)
+
+        model = PretrainedModelInfo(
+            pretrained_model_name="nmt_en_ru_transformer6x6",
+            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/nmt_en_ru_transformer6x6/versions/1.0.0rc1/files/nmt_en_ru_transformer6x6.nemo",
+            description="En->Ru translation model. See details here: https://ngc.nvidia.com/catalog/models/nvidia:nemo:nmt_en_ru_transformer6x6",
+        )
+        result.append(model)
+
+        model = PretrainedModelInfo(
+            pretrained_model_name="nmt_ru_en_transformer6x6",
+            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/nmt_ru_en_transformer6x6/versions/1.0.0rc1/files/nmt_ru_en_transformer6x6.nemo",
+            description="Ru->En translation model. See details here: https://ngc.nvidia.com/catalog/models/nvidia:nemo:nmt_ru_en_transformer6x6",
+        )
+        result.append(model)
+
+        model = PretrainedModelInfo(
+            pretrained_model_name="nmt_zh_en_transformer6x6",
+            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/nmt_zh_en_transformer6x6/versions/1.0.0rc1/files/nmt_zh_en_transformer6x6.nemo",
+            description="Zh->En translation model. See details here: https://ngc.nvidia.com/catalog/models/nvidia:nemo:nmt_zh_en_transformer6x6",
+        )
+        result.append(model)
+
+        model = PretrainedModelInfo(
+            pretrained_model_name="nmt_en_zh_transformer6x6",
+            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/nmt_en_zh_transformer6x6/versions/1.0.0rc1/files/nmt_en_zh_transformer6x6.nemo",
+            description="En->Zh translation model. See details here: https://ngc.nvidia.com/catalog/models/nvidia:nemo:nmt_en_zh_transformer6x6",
+        )
+        result.append(model)
+
+        return result

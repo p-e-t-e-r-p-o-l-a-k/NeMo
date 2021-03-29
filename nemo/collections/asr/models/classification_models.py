@@ -36,7 +36,7 @@ from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.core.neural_types import *
 from nemo.utils import logging, model_utils
 
-__all__ = ['EncDecClassificationModel', 'EncDecRegressionModel', 'MatchboxNet']
+__all__ = ['EncDecClassificationModel', 'EncDecRegressionModel']
 
 
 class _EncDecBaseModel(ASRModel, ExportableEncDecModel):
@@ -678,7 +678,8 @@ class EncDecRegressionModel(_EncDecBaseModel):
             'learning_rate': self._optimizer.param_groups[0]['lr'],
         }
 
-        return {'loss': loss, 'log': tensorboard_logs}
+        self.log_dict(tensorboard_logs)
+        return {'loss': loss}
 
     def validation_step(self, batch, batch_idx, dataloader_idx: int = 0):
         audio_signal, audio_signal_len, targets, targets_len = batch
@@ -740,7 +741,3 @@ class EncDecRegressionModel(_EncDecBaseModel):
             cfg.num_classes = 1
 
         OmegaConf.set_struct(cfg, True)
-
-
-class MatchboxNet(EncDecClassificationModel):
-    pass

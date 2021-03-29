@@ -151,36 +151,33 @@ pipeline {
             sh 'rm -rf examples/asr/speech_to_text_results'
           }
         }
-        // stage('Speech to Text - DALI AudioToMelSpectrogramPreprocessor') {
-        //   steps {
-        //     sh 'python examples/asr/speech_to_text.py \
-        //     model.train_ds.manifest_filepath=/home/TestData/an4_dataset/an4_train.json \
-        //     +model.train_ds.use_dali=True \
-        //     model.validation_ds.manifest_filepath=/home/TestData/an4_dataset/an4_val.json \
-        //     +model.validation_ds.use_dali=True \
-        //     model.preprocessor.cls=nemo.collections.asr.modules.AudioToMelSpectrogramPreprocessor \
-        //     model.preprocessor.params={} \
-        //     trainer.gpus=[0] \
-        //     +trainer.fast_dev_run=True \
-        //     exp_manager.exp_dir=examples/asr/speech_to_text_results'
-        //     sh 'rm -rf examples/asr/speech_to_text_results'
-        //   }
-        // }
-        // stage('Speech to Text - DALI AudioToMFCCPreprocessor') {
-        //   steps {
-        //     sh 'python examples/asr/speech_to_text.py \
-        //     model.train_ds.manifest_filepath=/home/TestData/an4_dataset/an4_train.json \
-        //     +model.train_ds.use_dali=True \
-        //     model.validation_ds.manifest_filepath=/home/TestData/an4_dataset/an4_val.json \
-        //     +model.validation_ds.use_dali=True \
-        //     model.preprocessor.cls=nemo.collections.asr.modules.AudioToMFCCPreprocessor \
-        //     model.preprocessor.params={} \
-        //     trainer.gpus=[0] \
-        //     +trainer.fast_dev_run=True \
-        //     exp_manager.exp_dir=examples/asr/speech_to_text_results'
-        //     sh 'rm -rf examples/asr/speech_to_text_results'
-        //   }
-        // }
+//         stage('Speech to Text - DALI AudioToMelSpectrogramPreprocessor') {
+//           steps {
+//             sh 'python examples/asr/speech_to_text.py \
+//             model.train_ds.manifest_filepath=/home/TestData/an4_dataset/an4_train.json \
+//             +model.train_ds.use_dali=True \
+//             model.validation_ds.manifest_filepath=/home/TestData/an4_dataset/an4_val.json \
+//             +model.validation_ds.use_dali=True \
+//             trainer.gpus=[0] \
+//             +trainer.fast_dev_run=True \
+//             exp_manager.exp_dir=examples/asr/speech_to_text_results'
+//             sh 'rm -rf examples/asr/speech_to_text_results'
+//           }
+//         }
+//         stage('Speech to Text - DALI AudioToMFCCPreprocessor') {
+//           steps {
+//             sh 'python examples/asr/speech_to_text.py \
+//             model.train_ds.manifest_filepath=/home/TestData/an4_dataset/an4_train.json \
+//             +model.train_ds.use_dali=True \
+//             model.validation_ds.manifest_filepath=/home/TestData/an4_dataset/an4_val.json \
+//             +model.validation_ds.use_dali=True \
+//             model.preprocessor._target_=nemo.collections.asr.modules.AudioToMFCCPreprocessor \
+//             trainer.gpus=[0] \
+//             +trainer.fast_dev_run=True \
+//             exp_manager.exp_dir=examples/asr/speech_to_text_results'
+//             sh 'rm -rf examples/asr/speech_to_text_results'
+//           }
+//         }
         stage('Speech to Label') {
           steps {
             sh 'python examples/asr/speech_to_label.py \
@@ -683,7 +680,7 @@ pipeline {
           steps {
             sh 'cd examples/nlp/token_classification && \
             python token_classification_train.py \
-            pretrained_model=/home/TestData/nlp/pretrained_models/NER_Model_with_BERT_base_uncased.nemo \
+            pretrained_model=ner_en_bert \
             model.dataset.data_dir=/home/TestData/nlp/ner/ \
             model.train_ds.batch_size=2 \
             model.dataset.use_cache=false \
@@ -697,7 +694,7 @@ pipeline {
           steps {
             sh 'cd examples/nlp/token_classification && \
             python punctuation_capitalization_train.py \
-            pretrained_model=/home/TestData/nlp/pretrained_models/Punctuation_Capitalization_with_BERT_base_uncased.nemo \
+            pretrained_model=punctuation_en_bert \
             model.dataset.data_dir=/home/TestData/nlp/token_classification_punctuation/ \
             trainer.gpus=[1] \
             +trainer.fast_dev_run=true \
@@ -994,6 +991,60 @@ pipeline {
       }
     }
 
+    stage('L2: NMT Tarred Dataset Creation') {
+      when {
+        anyOf{
+          branch 'main'
+          changeRequest target: 'main'
+        }
+      }
+      failFast true
+      parallel {
+        stage('L2: NMT Auto Tarred Dataset Creation') {
+            steps {
+              sh 'cd examples/nlp/machine_translation && \
+              python enc_dec_nmt.py \
+              --config-path=conf \
+              --config-name=aayn_base \
+              do_training=false \
+              model.preproc_out_dir=$PWD/preproc_out_dir \
+              model.train_ds.use_tarred_dataset=true \
+              model.train_ds.n_preproc_jobs=2 \
+              model.train_ds.lines_per_dataset_fragment=500 \
+              model.train_ds.num_batches_per_tarfile=10 \
+              model.train_ds.src_file_name=/home/TestData/nlp/nmt/toy_data/wmt14-de-en.src \
+              model.train_ds.tgt_file_name=/home/TestData/nlp/nmt/toy_data/wmt14-de-en.ref \
+              model.validation_ds.src_file_name=/home/TestData/nlp/nmt/toy_data/wmt14-de-en.src \
+              model.validation_ds.tgt_file_name=/home/TestData/nlp/nmt/toy_data/wmt14-de-en.src \
+              model.encoder_tokenizer.vocab_size=2000 \
+              model.decoder_tokenizer.vocab_size=2000 \
+              ~model.test_ds \
+              trainer.gpus=[0] \
+              +trainer.fast_dev_run=true \
+              exp_manager=null \
+              '
+            }
+        }
+
+        stage('L2: NMT Script Tarred Dataset Creation') {
+            steps {
+              sh 'cd examples/nlp/machine_translation && \
+              python create_tarred_parallel_dataset.py \
+              --src_fname /home/TestData/nlp/nmt/toy_data/wmt14-de-en.src \
+              --tgt_fname /home/TestData/nlp/nmt/toy_data/wmt14-de-en.ref \
+              --out_dir $PWD/preproc_out_dir \
+              --encoder_tokenizer_vocab_size=2000 \
+              --decoder_tokenizer_vocab_size=2000 \
+              --tokens_in_batch=1000 \
+              --lines_per_dataset_fragment=500 \
+              --num_batches_per_tarfile=10 \
+              --n_preproc_jobs=2 \
+              '
+            }
+        }
+      }
+    }
+
     stage('L2: TTS Fast dev runs 1') {
       when {
         anyOf{
@@ -1016,6 +1067,22 @@ pipeline {
             ~trainer.check_val_every_n_epoch'
           }
         }
+        // stage('FastPitch') {
+        //   steps {
+        //     sh 'python examples/tts/fastpitch.py \
+        //     train_dataset=/home/TestData/an4_dataset/an4_train.json \
+        //     validation_datasets=/home/TestData/an4_dataset/an4_val.json \
+        //     trainer.gpus="[0]" \
+        //     +trainer.fast_dev_run=True \
+        //     trainer.accelerator=null \
+        //     trainer.max_epochs=-1 \
+        //     model.train_ds.batch_size=12 \
+        //     model.train_ds.num_workers=1 \
+        //     model.validation_ds.batch_size=12 \
+        //     model.validation_ds.num_workers=1 \
+        //     ~trainer.check_val_every_n_epoch'
+        //   }
+        // }
         stage('WaveGlow') {
           steps {
             sh 'python examples/tts/waveglow.py \
